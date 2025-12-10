@@ -10,6 +10,7 @@ import numpy as np
 from tqdm import tqdm
 from dataclasses import dataclass, field
 from typing import Optional
+from huggingface_hub import hf_hub_download
 
 import transformers
 
@@ -78,7 +79,13 @@ def main(data_args):
 
     tokenizer_config = TokenizerConfigs["DV"].value
     tokenizer_config.update(dict(spatial_compression=16, temporal_compression=8))
-    model = CosmosTokenizer(checkpoint_enc=f"{data_args.vq_model_ckpt}/encoder.jit", checkpoint_dec=f"{data_args.vq_model_ckpt}/decoder.jit", tokenizer_config=tokenizer_config)
+    if os.path.isdir(data_args.vq_model_ckpt):
+        checkpoint_enc = f"{data_args.vq_model_ckpt}/encoder.jit"
+        checkpoint_dec = f"{data_args.vq_model_ckpt}/decoder.jit"
+    else:
+        checkpoint_enc = hf_hub_download(repo_id=data_args.vq_model_ckpt, filename="encoder.jit")
+        checkpoint_dec = hf_hub_download(repo_id=data_args.vq_model_ckpt, filename="decoder.jit")
+    model = CosmosTokenizer(checkpoint_enc=checkpoint_enc, checkpoint_dec=checkpoint_dec, tokenizer_config=tokenizer_config)
     
     model.eval()
     model.requires_grad_(False)

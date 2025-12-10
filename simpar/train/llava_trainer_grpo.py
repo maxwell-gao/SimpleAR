@@ -16,6 +16,7 @@ import os
 import sys
 import logging
 import wandb
+from huggingface_hub import hf_hub_download
 from typing import Union, Any, Optional
 from dataclasses import dataclass, field
 from PIL import Image
@@ -412,7 +413,13 @@ def main(script_args, training_args, model_args):
     # Load VQ model
     tokenizer_config = TokenizerConfigs["DV"].value
     tokenizer_config.update(dict(spatial_compression=16, temporal_compression=8))
-    vq_model = CosmosTokenizer(checkpoint_enc=f"{script_args.vq_model_ckpt}/encoder.jit", checkpoint_dec=f"{script_args.vq_model_ckpt}/decoder.jit", tokenizer_config=tokenizer_config)
+    if os.path.isdir(script_args.vq_model_ckpt):
+        checkpoint_enc = f"{script_args.vq_model_ckpt}/encoder.jit"
+        checkpoint_dec = f"{script_args.vq_model_ckpt}/decoder.jit"
+    else:
+        checkpoint_enc = hf_hub_download(repo_id=script_args.vq_model_ckpt, filename="encoder.jit")
+        checkpoint_dec = hf_hub_download(repo_id=script_args.vq_model_ckpt, filename="decoder.jit")
+    vq_model = CosmosTokenizer(checkpoint_enc=checkpoint_enc, checkpoint_dec=checkpoint_dec, tokenizer_config=tokenizer_config)
     vq_model.eval()
     vq_model.requires_grad_(False)
 

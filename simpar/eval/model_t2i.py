@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import torch
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
+from huggingface_hub import hf_hub_download
 
 import transformers
 
@@ -160,7 +161,13 @@ def main(args):
 
     tokenizer_config = TokenizerConfigs["DV"].value
     tokenizer_config.update(dict(spatial_compression=16, temporal_compression=8))
-    vq_model = CosmosTokenizer(checkpoint_enc=f"{args.vq_model_ckpt}/encoder.jit", checkpoint_dec=f"{args.vq_model_ckpt}/decoder.jit", tokenizer_config=tokenizer_config)
+    if os.path.isdir(args.vq_model_ckpt):
+        checkpoint_enc = f"{args.vq_model_ckpt}/encoder.jit"
+        checkpoint_dec = f"{args.vq_model_ckpt}/decoder.jit"
+    else:
+        checkpoint_enc = hf_hub_download(repo_id=args.vq_model_ckpt, filename="encoder.jit")
+        checkpoint_dec = hf_hub_download(repo_id=args.vq_model_ckpt, filename="decoder.jit")
+    vq_model = CosmosTokenizer(checkpoint_enc=checkpoint_enc, checkpoint_dec=checkpoint_dec, tokenizer_config=tokenizer_config)
 
     vq_model.eval()
     vq_model.requires_grad_(False)
