@@ -99,7 +99,7 @@ def main(args):
     try:
         # device_map="auto" might try to use all GPUs if not careful. 
         # We explicitly pass the local device.
-        tokenizer, model, _, _ = load_pretrained_model(args.model_path, device_map=device)
+        tokenizer, model, _, _ = load_pretrained_model(args.model_path, attn_implementation="sdpa", device_map=device)
         model.eval()
         model.requires_grad_(False) # Freeze model
     except Exception as e:
