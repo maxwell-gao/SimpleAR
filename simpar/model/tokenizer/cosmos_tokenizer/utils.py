@@ -106,7 +106,19 @@ def _load_pytorch_model(
     """
     tokenizer_name = tokenizer_config["name"]
     model = TokenizerModels[tokenizer_name].value(**tokenizer_config)
-    ckpts = torch.jit.load(jit_filepath, map_location=device)
+    try:
+        ckpts = torch.jit.load(jit_filepath, map_location=device)
+    except RuntimeError:
+        try:
+            state_dict = torch.load(jit_filepath, map_location=device)
+            class StateDictWrapper:
+                def __init__(self, sd):
+                    self.sd = sd
+                def state_dict(self):
+                    return self.sd
+            ckpts = StateDictWrapper(state_dict)
+        except Exception:
+            raise RuntimeError(f"Could not load model from {jit_filepath}. It is neither a valid JIT model nor a state_dict.")
     return model, ckpts
 
 

@@ -138,6 +138,9 @@ def main(args):
         checkpoint_enc = hf_hub_download(repo_id=args.vq_model_ckpt, filename="encoder.jit")
         checkpoint_dec = hf_hub_download(repo_id=args.vq_model_ckpt, filename="decoder.jit")
 
+    print(f"Loading encoder from {checkpoint_enc}")
+    print(f"Loading decoder from {checkpoint_dec}")
+
     vq_model = CosmosTokenizer(checkpoint_enc=checkpoint_enc, checkpoint_dec=checkpoint_dec, tokenizer_config=tokenizer_config)
 
     vq_model.eval()
