@@ -190,7 +190,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-path", type=str, default="./checkpoints/simpar_0.5B_rl")
     parser.add_argument("--model-base", type=str, default=None)
     parser.add_argument("--vq-model", type=str, default="llamagen")
-    parser.add_argument("--vq-model-ckpt", type=str, default="./checkpoints/Cosmos-1.0-Tokenizer-DV8x16x16")
+    parser.add_argument("--vq-model-ckpt", type=str, default="nvidia/Cosmos-1.0-Tokenizer-DV8x16x16")
     parser.add_argument("--benchmark", type=str, default="mjhq")
     parser.add_argument("--data_dir", type=str, default="")
     parser.add_argument("--ann_path", type=str)

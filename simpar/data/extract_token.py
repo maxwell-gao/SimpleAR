@@ -49,7 +49,7 @@ class DataArguments:
     mixture_ratio: str = field(default=None)
     p_drop_cond: float = field(default=0.0)
 
-    vq_model_ckpt: str = field(default="/path_to_tokenizer/Cosmos-1.0-Tokenizer-DV8x16x16")
+    vq_model_ckpt: str = field(default="nvidia/Cosmos-1.0-Tokenizer-DV8x16x16")
     dataset_name: str = field(default="laion")
     dataset_type: str = field(default="image")
     code_path: str = field(default="./debug")

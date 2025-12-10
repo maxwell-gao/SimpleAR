@@ -355,7 +355,7 @@ class GRPOScriptArguments(ScriptArguments):
     )
 
     vq_model_ckpt: str = field(
-        default="/path_to_tokenizer/Cosmos-1.0-Tokenizer-DV8x16x16"
+        default="nvidia/Cosmos-1.0-Tokenizer-DV8x16x16"
     )
 
     clip_model_ckpt: str = field(
