@@ -187,7 +187,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, default="./checkpoints/simpar_0.5B_rl")
+    parser.add_argument("--model-path", type=str, default="Daniel0724/SimpleAR-0.5B-RL")
     parser.add_argument("--model-base", type=str, default=None)
     parser.add_argument("--vq-model", type=str, default="llamagen")
     parser.add_argument("--vq-model-ckpt", type=str, default="nvidia/Cosmos-1.0-Tokenizer-DV8x16x16")
