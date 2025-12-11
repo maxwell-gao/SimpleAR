@@ -47,6 +47,11 @@ class ProtoTokenOptimizer:
         # Freeze model parameters to ensure they are not updated and save memory
         self.model.requires_grad_(False)
         
+        # Compile model components for A100 acceleration
+        print("Compiling model components with torch.compile (this may take a minute)...")
+        self.model.model = torch.compile(self.model.model)
+        self.model.lm_head = torch.compile(self.model.lm_head)
+        
         # Initialize proto-tokens
         # e_t: image specific embedding
         self.e_t = nn.Parameter(torch.randn(1, hidden_size, device=device, dtype=model.dtype) * 0.01)
@@ -57,7 +62,8 @@ class ProtoTokenOptimizer:
         self.optimizer = torch.optim.AdamW(
             [self.e_t, self.m],
             lr=0.01,
-            weight_decay=0.0
+            weight_decay=0.0,
+            fused=True
         )
         
         # Learning rate scheduler
@@ -416,6 +422,12 @@ def main(args):
     # Set random seed
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
+    
+    # Enable TF32 and optimizations for A100
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    print("✓ Enabled TF32 and CuDNN benchmark for A100 acceleration")
     
     if args.image_size < 1024:
         print(f"\n⚠️  Warning: Image size {args.image_size} may result in blurry images due to high VQGAN compression (16x).")
