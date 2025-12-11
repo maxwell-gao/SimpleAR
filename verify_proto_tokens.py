@@ -503,9 +503,13 @@ def main(args):
     
     # WandB record reference image
     if args.use_wandb and WANDB_AVAILABLE:
+        # Normalize image from [-1, 1] to [0, 1] for WandB
+        ref_img_vis = (reference_image[0].float().cpu() + 1) / 2
+        ref_img_vis = torch.clamp(ref_img_vis, 0, 1)
+        
         wandb.log({
             "reference_image": wandb.Image(
-                reference_image[0].float().cpu(),
+                ref_img_vis,
                 caption=f"Reference: {args.prompt}"
             ),
             "num_visual_tokens": visual_tokens.size(1)
@@ -532,12 +536,19 @@ def main(args):
     
     # WandB record reconstruction result
     if args.use_wandb and WANDB_AVAILABLE:
+        # Normalize images from [-1, 1] to [0, 1] for WandB
+        recon_img_vis = (reconstructed_image[0].float().cpu() + 1) / 2
+        recon_img_vis = torch.clamp(recon_img_vis, 0, 1)
+        
+        comp_img_vis = (comparison[0].float().cpu() + 1) / 2
+        comp_img_vis = torch.clamp(comp_img_vis, 0, 1)
+        
         wandb.log({
             "reconstructed_image": wandb.Image(
-                reconstructed_image[0].float().cpu(),
+                recon_img_vis,
                 caption=f"Reconstructed (Acc: {optimizer.history['accuracy'][-1]:.2f}%)"
             ),
-            "comparison": wandb.Image(comparison[0].float().cpu(), caption="Left: Reference | Right: Reconstructed"),
+            "comparison": wandb.Image(comp_img_vis, caption="Left: Reference | Right: Reconstructed"),
         })
     
     # Compute token difference distribution
