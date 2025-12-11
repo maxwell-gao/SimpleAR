@@ -17,7 +17,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 from torchvision.utils import save_image
 from huggingface_hub import hf_hub_download
 import numpy as np
@@ -198,61 +197,6 @@ class ProtoTokenOptimizer:
         # Greedy decoding
         predictions = logits.argmax(dim=-1)
         return predictions
-    
-    def plot_training_curves(self, save_path):
-        """Plot training curves"""
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-        
-        # Loss curve
-        axes[0, 0].plot(self.history['loss'])
-        axes[0, 0].set_xlabel('Step')
-        axes[0, 0].set_ylabel('Loss')
-        axes[0, 0].set_title('Training Loss')
-        axes[0, 0].grid(True)
-        
-        # Accuracy curve
-        axes[0, 1].plot(self.history['accuracy'], label='Top-1')
-        axes[0, 1].plot(self.history['top5_accuracy'], label='Top-5')
-        axes[0, 1].set_xlabel('Step')
-        axes[0, 1].set_ylabel('Accuracy (%)')
-        axes[0, 1].set_title('Token Prediction Accuracy')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True)
-        
-        # Correct tokens
-        axes[0, 2].plot(self.history['correct_tokens'])
-        axes[0, 2].set_xlabel('Step')
-        axes[0, 2].set_ylabel('# Correct Tokens')
-        axes[0, 2].set_title('Number of Correctly Reconstructed Tokens')
-        axes[0, 2].grid(True)
-        
-        # Learning rate
-        axes[1, 0].semilogy(range(len(self.history['loss'])), 
-                           [self.scheduler.get_last_lr()[0]] * len(self.history['loss']))
-        axes[1, 0].set_xlabel('Step')
-        axes[1, 0].set_ylabel('Learning Rate')
-        axes[1, 0].set_title('Learning Rate Schedule')
-        axes[1, 0].grid(True)
-        
-        # Embedding norms
-        axes[1, 1].plot(self.history['e_t_norm'], label='e_t norm')
-        axes[1, 1].plot(self.history['m_norm'], label='m norm')
-        axes[1, 1].set_xlabel('Step')
-        axes[1, 1].set_ylabel('L2 Norm')
-        axes[1, 1].set_title('Proto-Token Embedding Norms')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True)
-        
-        # Gradient norms
-        axes[1, 2].plot(self.history['grad_norm'])
-        axes[1, 2].set_xlabel('Step')
-        axes[1, 2].set_ylabel('Gradient Norm')
-        axes[1, 2].set_title('Gradient Norms (before clipping)')
-        axes[1, 2].grid(True)
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150)
-        print(f"Training curves saved to: {save_path}")
 
 
 def generate_reference_image(model, vq_model, tokenizer, prompt, args):
@@ -396,14 +340,6 @@ def verify_proto_tokens(model, tokenizer, visual_tokens, args):
     print("\nOptimization completed!")
     print(f"Final Accuracy: {accuracy:.2f}%")
     print(f"Best Accuracy: {best_accuracy:.2f}% (at step {best_step})")
-    
-    # Plot training curves
-    curve_path = os.path.join(args.save_dir, "training_curves.png")
-    optimizer.plot_training_curves(curve_path)
-    
-    # WandB upload training curves
-    if args.use_wandb and WANDB_AVAILABLE:
-        wandb.log({"training_curves": wandb.Image(curve_path)})
     
     # Save proto-tokens
     proto_tokens_path = os.path.join(args.save_dir, "proto_tokens.pt")
@@ -604,16 +540,9 @@ def main(args):
         latent_size = int(np.sqrt(len(token_diff)))
         error_map = token_diff.reshape(latent_size, latent_size).astype(float)
         
-        import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(8, 8))
-        im = ax.imshow(error_map, cmap='hot', interpolation='nearest')
-        ax.set_title(f'Token Error Map (Red = Wrong)')
-        plt.colorbar(im)
-        error_map_path = os.path.join(args.save_dir, "error_map.png")
-        plt.savefig(error_map_path)
-        plt.close()
-        
-        wandb.log({"token_error_map": wandb.Image(error_map_path)})
+        # Log error map directly to wandb as a heatmap if possible, or skip image generation to avoid matplotlib dependency
+        # For now, we will just log the error rate which is already done in summary
+        pass
     
     # Final summary
     print("\n" + "="*80)

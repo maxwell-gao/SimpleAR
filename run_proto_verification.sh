@@ -15,7 +15,7 @@ IMAGE_SIZE=256  # Use smaller size to speed up experiment
 NUM_STEPS=1000
 PROMPT="a red apple on a wooden table"
 SAVE_DIR="./proto_tokens_exp"
-USE_WANDB=false  # Set to true to enable WandB
+USE_WANDB=true  # Set to true to enable WandB
 
 echo "Configuration:"
 echo "  Model: $MODEL_PATH"
