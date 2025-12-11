@@ -37,7 +37,7 @@ from simpar.utils import disable_torch_init
 class ProtoTokenOptimizer:
     """Optimizer class for learning proto-tokens"""
     
-    def __init__(self, model, hidden_size, device, tokenizer_offset, use_wandb=False):
+    def __init__(self, model, hidden_size, device, tokenizer_offset, num_steps=1000, use_wandb=False):
         self.model = model
         self.device = device
         self.hidden_size = hidden_size
@@ -63,7 +63,7 @@ class ProtoTokenOptimizer:
         # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            T_max=1000,
+            T_max=num_steps,
             eta_min=1e-5
         )
         
@@ -289,6 +289,7 @@ def verify_proto_tokens(model, tokenizer, visual_tokens, args):
         hidden_size=hidden_size,
         device=args.device,
         tokenizer_offset=len(tokenizer),
+        num_steps=args.num_steps,
         use_wandb=args.use_wandb
     )
     
@@ -492,10 +493,33 @@ def main(args):
     print("✓ SimpleAR Model loaded")
     
     # Step 1: Generate reference image
-    visual_tokens, reference_image = generate_reference_image(
-        model, vq_model, tokenizer, args.prompt, args
-    )
+    tokens_path = os.path.join(args.save_dir, "visual_tokens.pt")
     
+    if os.path.exists(tokens_path) and not args.force_generate:
+        print(f"\nFound existing visual tokens at {tokens_path}. Skipping generation.")
+        visual_tokens = torch.load(tokens_path, map_location=args.device)
+        
+        # Decode to get reference image for visualization
+        print("Decoding visual tokens to get reference image...")
+        codebook_size = 64000
+        latent_size = args.image_size // 16
+        
+        index_sample = visual_tokens - len(tokenizer)
+        index_sample = torch.clamp(index_sample, min=0, max=codebook_size-1)
+        index_sample = index_sample.reshape(-1, latent_size, latent_size).unsqueeze(1)
+        
+        with torch.inference_mode():
+            reference_image = vq_model.decode(index_sample)
+        reference_image = reference_image.squeeze(2)
+        print(f"✓ Visual tokens loaded: {visual_tokens.shape}")
+    else:
+        visual_tokens, reference_image = generate_reference_image(
+            model, vq_model, tokenizer, args.prompt, args
+        )
+        # Save visual tokens
+        torch.save(visual_tokens, tokens_path)
+        print(f"Visual tokens saved to: {tokens_path}")
+
     # Save reference image
     ref_image_path = os.path.join(args.save_dir, "reference_image.png")
     save_image(reference_image, ref_image_path, normalize=True, value_range=(-1, 1))
@@ -621,6 +645,8 @@ if __name__ == "__main__":
     parser.add_argument("--image-size", type=int, default=1024,
                        choices=[256, 512, 768, 1024],
                        help="Image size (1024 is recommended for best quality)")
+    parser.add_argument("--force-generate", action="store_true",
+                       help="Force regenerate reference image even if it exists")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=64000)
