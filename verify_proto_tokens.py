@@ -177,69 +177,10 @@ class ProtoTokenOptimizer:
         return loss.item(), accuracy, correct, top5_acc, e_t_norm, m_norm, grad_norm
     
     @torch.no_grad()
-    def evaluate(self, target_tokens, vq_model=None, tokenizer_offset=None, args=None, step=None):
-        """Evaluate reconstruction effect of current proto-tokens.
-
-        If a `vq_model`, `tokenizer_offset` and WandB are available, decode the
-        reconstructed tokens to an image and upload it to WandB. If `args` is
-        provided and contains `save_dir`, the reconstructed image will also be
-        saved locally as `reconstructed_eval_step_<step>.png` (or `final` when
-        `step` is None).
-        """
+    def evaluate(self, target_tokens):
+        """Evaluate reconstruction effect of current proto-tokens"""
         self.model.eval()
-
-        loss, accuracy, correct, top5 = self.compute_loss_and_accuracy(target_tokens)
-
-        # Always generate reconstructed tokens for inspection
-        seq_length = target_tokens.size(1)
-        reconstructed_tokens = self.generate(seq_length)
-
-        # If WandB is enabled and VQ model + tokenizer offset provided, decode and upload
-        if self.use_wandb and WANDB_AVAILABLE and vq_model is not None and tokenizer_offset is not None:
-            # Determine latent size (if args present use image_size // 16, otherwise infer)
-            try:
-                latent_size = args.image_size // 16 if args is not None else int(seq_length ** 0.5)
-            except Exception:
-                latent_size = int(seq_length ** 0.5)
-
-            codebook_size = 64000
-            index_sample = reconstructed_tokens - tokenizer_offset
-            index_sample = torch.clamp(index_sample, min=0, max=codebook_size - 1)
-            index_sample = index_sample.reshape(-1, latent_size, latent_size).unsqueeze(1)
-
-            with torch.inference_mode():
-                reconstructed_image = vq_model.decode(index_sample)
-
-            reconstructed_image = reconstructed_image.squeeze(2)
-
-            # Save locally if save_dir provided
-            if args is not None and getattr(args, 'save_dir', None):
-                os.makedirs(args.save_dir, exist_ok=True)
-                step_tag = step if step is not None else 'final'
-                save_path = os.path.join(args.save_dir, f"reconstructed_eval_step_{step_tag}.png")
-                try:
-                    save_image(reconstructed_image, save_path, normalize=True, value_range=(-1, 1))
-                except Exception:
-                    # Fail gracefully if saving fails
-                    pass
-
-            # Prepare image for WandB (normalize to [0,1]) and log
-            try:
-                recon_img_vis = (reconstructed_image[0].float().cpu() + 1) / 2
-                recon_img_vis = torch.clamp(recon_img_vis, 0, 1)
-                caption = f"Reconstructed (Acc: {accuracy:.2f}%)"
-                if step is not None:
-                    caption += f" step:{step}"
-
-                wandb.log({
-                    "evaluation/reconstructed_image": wandb.Image(recon_img_vis, caption=caption),
-                    "evaluation/accuracy": accuracy
-                }, step=step)
-            except Exception:
-                # Ensure evaluation doesn't crash if logging fails
-                pass
-
-        return loss, accuracy, correct, top5
+        return self.compute_loss_and_accuracy(target_tokens)
     
     @torch.no_grad()
     def generate(self, seq_length):
@@ -321,7 +262,7 @@ def generate_reference_image(model, vq_model, tokenizer, prompt, args):
     return visual_tokens, image
 
 
-def verify_proto_tokens(model, tokenizer, visual_tokens, args):
+def verify_proto_tokens(model, tokenizer, vq_model, visual_tokens, args):
     """
     Verify if proto-tokens can reconstruct visual token sequence
     
@@ -341,6 +282,7 @@ def verify_proto_tokens(model, tokenizer, visual_tokens, args):
     print(f"Sequence length: {seq_length}")
     print(f"Hidden size: {hidden_size}")
     print(f"Optimization steps: {args.num_steps}")
+    print(f"Evaluation interval: {args.eval_interval} steps")
     
     # Create optimizer
     optimizer = ProtoTokenOptimizer(
@@ -390,6 +332,35 @@ def verify_proto_tokens(model, tokenizer, visual_tokens, args):
                 'step': step
             }
             wandb.log(log_dict)
+
+        # Periodic evaluation and upload reconstructed image to WandB
+        if (step + 1) % args.eval_interval == 0 or (step + 1) == args.num_steps:
+            # Reconstruct using current proto-tokens
+            reconstructed_image, reconstructed_tokens = reconstruct_image(
+                optimizer, vq_model, visual_tokens, len(tokenizer), args
+            )
+
+            # Save reconstructed image for this step
+            recon_image_step_path = os.path.join(args.save_dir, f"reconstructed_step_{step+1}.png")
+            try:
+                save_image(reconstructed_image, recon_image_step_path, normalize=True, value_range=(-1, 1))
+                print(f"Saved reconstructed image at step {step+1}: {recon_image_step_path}")
+            except Exception:
+                print(f"Warning: failed to save reconstructed image at step {step+1}")
+
+            # Upload to WandB (if enabled)
+            if args.use_wandb and WANDB_AVAILABLE:
+                # Normalize image from [-1, 1] to [0, 1] for WandB
+                recon_img_vis = (reconstructed_image[0].float().cpu() + 1) / 2
+                recon_img_vis = torch.clamp(recon_img_vis, 0, 1)
+
+                wandb.log({
+                    f"reconstructed_image/step_{step+1}": wandb.Image(
+                        recon_img_vis,
+                        caption=f"Reconstructed step {step+1} (train acc: {accuracy:.2f}%)"
+                    ),
+                    'step': step
+                })
         
         # Print detailed info periodically
         if (step + 1) % 100 == 0:
@@ -599,7 +570,7 @@ def main(args):
         })
     
     # Step 2: Optimize proto-tokens
-    optimizer = verify_proto_tokens(model, tokenizer, visual_tokens, args)
+    optimizer = verify_proto_tokens(model, tokenizer, vq_model, visual_tokens, args)
     
     # Step 3: Reconstruct image
     reconstructed_image, reconstructed_tokens = reconstruct_image(
@@ -732,6 +703,10 @@ if __name__ == "__main__":
     parser.add_argument("--wandb-run-name", type=str, default=None,
                        help="WandB run name (auto-generated by default)")
     
+    # Evaluation interval for periodic reconstruction and upload
+    parser.add_argument("--eval-interval", type=int, default=100,
+                       help="Evaluation interval (steps) to reconstruct and upload images to WandB")
+
     args = parser.parse_args()
     
     # Auto-generate run name
@@ -739,5 +714,5 @@ if __name__ == "__main__":
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         args.wandb_run_name = f"proto_tokens_{args.image_size}px_{timestamp}"
-    
+
     main(args)
