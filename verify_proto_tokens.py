@@ -413,6 +413,10 @@ def main(args):
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     
+    if args.image_size < 1024:
+        print(f"\n⚠️  Warning: Image size {args.image_size} may result in blurry images due to high VQGAN compression (16x).")
+        print("    Recommended size is 1024x1024.")
+    
     disable_torch_init()
     
     # Create save directory
@@ -600,9 +604,9 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str,
                        default="a red apple on a wooden table",
                        help="Prompt for image generation")
-    parser.add_argument("--image-size", type=int, default=512,
+    parser.add_argument("--image-size", type=int, default=1024,
                        choices=[256, 512, 768, 1024],
-                       help="Image size (use smaller size to speed up experiment)")
+                       help="Image size (1024 is recommended for best quality)")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=64000)
