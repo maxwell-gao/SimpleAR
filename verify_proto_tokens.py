@@ -364,6 +364,7 @@ def verify_proto_tokens(model, tokenizer, vq_model, visual_tokens, args):
                 # Normalize image from [-1, 1] to [0, 1] for WandB
                 recon_img_vis = (reconstructed_image[0].float().cpu() + 1) / 2
                 recon_img_vis = torch.clamp(recon_img_vis, 0, 1)
+                print(f"Uploading reconstructed image at step {step+1} to WandB...")
 
                 # Log using the same title/key so WandB groups them together
                 wandb.log({
