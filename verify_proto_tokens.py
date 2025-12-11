@@ -536,7 +536,7 @@ def main(args):
         })
     
     # Compute token difference distribution
-    token_diff = (reconstructed_tokens[:, 1:] != visual_tokens[:, 1:]).cpu().numpy()[0]
+    token_diff = (reconstructed_tokens != visual_tokens).cpu().numpy()[0]
     error_positions = np.where(token_diff)[0]
     
     if args.use_wandb and WANDB_AVAILABLE and len(error_positions) > 0:
