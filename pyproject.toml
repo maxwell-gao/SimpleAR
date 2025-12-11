@@ -15,6 +15,9 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
 ]
+dependencies = [
+    "wandb>=0.23.1",
+]
 
 [project.optional-dependencies]
 standalone = ["shortuuid", "httpx==0.24.0", "einops", "ftfy"]
