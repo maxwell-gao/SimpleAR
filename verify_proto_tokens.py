@@ -600,7 +600,7 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str,
                        default="a red apple on a wooden table",
                        help="Prompt for image generation")
-    parser.add_argument("--image-size", type=int, default=256,
+    parser.add_argument("--image-size", type=int, default=512,
                        choices=[256, 512, 768, 1024],
                        help="Image size (use smaller size to speed up experiment)")
     parser.add_argument("--temperature", type=float, default=1.0)
