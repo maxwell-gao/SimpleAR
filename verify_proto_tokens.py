@@ -44,11 +44,14 @@ class ProtoTokenOptimizer:
         self.tokenizer_offset = tokenizer_offset
         self.use_wandb = use_wandb and WANDB_AVAILABLE
         
+        # Freeze model parameters to ensure they are not updated and save memory
+        self.model.requires_grad_(False)
+        
         # Initialize proto-tokens
         # e_t: image specific embedding
-        self.e_t = nn.Parameter(torch.randn(1, hidden_size, device=device) * 0.01)
+        self.e_t = nn.Parameter(torch.randn(1, hidden_size, device=device, dtype=model.dtype) * 0.01)
         # m: reusable embedding
-        self.m = nn.Parameter(torch.randn(1, hidden_size, device=device) * 0.01)
+        self.m = nn.Parameter(torch.randn(1, hidden_size, device=device, dtype=model.dtype) * 0.01)
         
         # Optimizer
         self.optimizer = torch.optim.AdamW(
