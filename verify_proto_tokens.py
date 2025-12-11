@@ -340,9 +340,13 @@ def verify_proto_tokens(model, tokenizer, vq_model, visual_tokens, args):
                 'embeddings/e_t_norm': e_t_norm,
                 'embeddings/m_norm': m_norm,
                 'gradients/grad_norm': grad_norm,
-                'step': step
             }
-            wandb.log(log_dict)
+            # Ensure WandB receives a monotonically increasing step index
+            try:
+                wandb.log(log_dict, step=step+1)
+            except Exception:
+                # Fallback to default logging if explicit step fails
+                wandb.log(log_dict)
 
         # Periodic evaluation and upload reconstructed image to WandB
         if (step + 1) % args.eval_interval == 0 or (step + 1) == args.num_steps:
