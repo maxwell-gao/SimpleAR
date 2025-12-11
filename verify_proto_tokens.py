@@ -21,6 +21,11 @@ from torchvision.utils import save_image
 from huggingface_hub import hf_hub_download
 import numpy as np
 
+# Fix for Conda environment on Ubuntu not finding system headers for torch.compile
+if os.path.exists("/usr/include/x86_64-linux-gnu"):
+    os.environ["C_INCLUDE_PATH"] = os.environ.get("C_INCLUDE_PATH", "") + ":/usr/include/x86_64-linux-gnu"
+    os.environ["CPLUS_INCLUDE_PATH"] = os.environ.get("CPLUS_INCLUDE_PATH", "") + ":/usr/include/x86_64-linux-gnu"
+
 try:
     import wandb
     WANDB_AVAILABLE = True
