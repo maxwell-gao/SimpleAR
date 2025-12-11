@@ -220,6 +220,9 @@ def generate_reference_image(model, vq_model, tokenizer, prompt, args):
     format_prompt = "<|t2i|>" + "A highly realistic image of " + prompt + "<|soi|>"
     input_ids = tokenizer(format_prompt, return_tensors="pt").input_ids.to(args.device)
     
+    uncond_prompt = "<|t2i|>" + "An image of aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion" + "<|soi|>"
+    uncond_input_ids = tokenizer(uncond_prompt, return_tensors="pt").input_ids.to(args.device)
+    
     print(f"Prompt: {prompt}")
     print(f"Input sequence length: {input_ids.shape[1]}")
     print(f"Visual tokens to generate: {max_new_tokens}")
@@ -227,8 +230,10 @@ def generate_reference_image(model, vq_model, tokenizer, prompt, args):
     # Generate visual tokens
     print("Generating image...")
     with torch.inference_mode():
-        output_ids = model.generate(
+        output_ids = model.generate_visual(
             input_ids,
+            negative_prompt_ids=uncond_input_ids,
+            cfg_scale=6.0,
             do_sample=True,
             temperature=args.temperature,
             top_p=args.top_p,
