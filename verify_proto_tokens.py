@@ -106,16 +106,15 @@ class ProtoTokenOptimizer:
         input_embeds = self.construct_input_embeddings(seq_length)
         
         # Forward pass
-        with torch.set_grad_enabled(self.training):
-            outputs = self.model.model(
-                inputs_embeds=input_embeds,
-                use_cache=False,
-                return_dict=True
-            )
-            hidden_states = outputs.last_hidden_state  # [1, seq_length, hidden_size]
-            
-            # Get logits through lm_head
-            logits = self.model.lm_head(hidden_states)  # [1, seq_length, vocab_size]
+        outputs = self.model.model(
+            inputs_embeds=input_embeds,
+            use_cache=False,
+            return_dict=True
+        )
+        hidden_states = outputs.last_hidden_state  # [1, seq_length, hidden_size]
+        
+        # Get logits through lm_head
+        logits = self.model.lm_head(hidden_states)  # [1, seq_length, vocab_size]
         
         # Compute loss (using causal mask, each position predicts the next token)
         # logits[:, :-1] predicts target_tokens[:, 1:]
