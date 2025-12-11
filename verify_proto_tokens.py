@@ -496,7 +496,7 @@ def main(args):
     if args.use_wandb and WANDB_AVAILABLE:
         wandb.log({
             "reference_image": wandb.Image(
-                reference_image.cpu(),
+                reference_image[0].cpu(),
                 caption=f"Reference: {args.prompt}"
             ),
             "num_visual_tokens": visual_tokens.size(1)
@@ -525,10 +525,10 @@ def main(args):
     if args.use_wandb and WANDB_AVAILABLE:
         wandb.log({
             "reconstructed_image": wandb.Image(
-                reconstructed_image.cpu(),
+                reconstructed_image[0].cpu(),
                 caption=f"Reconstructed (Acc: {optimizer.history['accuracy'][-1]:.2f}%)"
             ),
-            "comparison": wandb.Image(comparison.cpu(), caption="Left: Reference | Right: Reconstructed"),
+            "comparison": wandb.Image(comparison[0].cpu(), caption="Left: Reference | Right: Reconstructed"),
         })
     
     # Compute token difference distribution
