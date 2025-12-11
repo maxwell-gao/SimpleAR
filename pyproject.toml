@@ -37,7 +37,6 @@ train = [
     "peft==0.4.0",
     "accelerate>=0.29.1",
     "bitsandbytes==0.41.0",
-    "sentencepiece~=0.1.99",
     "einops==0.6.1",
     "einops-exts==0.0.4",
     "gradio_client==0.2.9",
