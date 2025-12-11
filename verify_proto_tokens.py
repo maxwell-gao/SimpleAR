@@ -119,26 +119,24 @@ class ProtoTokenOptimizer:
         # Get logits through lm_head
         logits = self.model.lm_head(hidden_states)  # [1, seq_length, vocab_size]
         
-        # Compute loss (using causal mask, each position predicts the next token)
-        # logits[:, :-1] predicts target_tokens[:, 1:]
-        shift_logits = logits[:, :-1, :].contiguous()
-        shift_labels = target_tokens[:, 1:].contiguous()
-        
+        # Compute loss
+        # In Proto-Token setting, input at position i should predict target at position i
+        # No shifting needed because inputs are placeholders [e_t, m, m...]
         loss = F.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
+            logits.view(-1, logits.size(-1)),
+            target_tokens.view(-1),
             reduction='mean'
         )
         
         # Compute accuracy
-        predictions = shift_logits.argmax(dim=-1)
-        correct = (predictions == shift_labels).sum().item()
-        total = shift_labels.numel()
+        predictions = logits.argmax(dim=-1)
+        correct = (predictions == target_tokens).sum().item()
+        total = target_tokens.numel()
         accuracy = correct / total * 100
         
         # Compute Top-5 accuracy
-        top5_preds = shift_logits.topk(5, dim=-1).indices
-        top5_correct = (top5_preds == shift_labels.unsqueeze(-1)).any(dim=-1).sum().item()
+        top5_preds = logits.topk(5, dim=-1).indices
+        top5_correct = (top5_preds == target_tokens.unsqueeze(-1)).any(dim=-1).sum().item()
         top5_accuracy = top5_correct / total * 100
         
         return loss, accuracy, correct, top5_accuracy
@@ -387,8 +385,8 @@ def reconstruct_image(optimizer, vq_model, visual_tokens, tokenizer_offset, args
     reconstructed_tokens = optimizer.generate(seq_length)
     
     # Compute reconstruction accuracy
-    correct = (reconstructed_tokens[:, 1:] == visual_tokens[:, 1:]).sum().item()
-    total = seq_length - 1
+    correct = (reconstructed_tokens == visual_tokens).sum().item()
+    total = seq_length
     accuracy = correct / total * 100
     
     print(f"Reconstruction Accuracy: {accuracy:.2f}% ({correct}/{total} tokens)")
