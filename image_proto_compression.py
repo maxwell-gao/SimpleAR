@@ -41,7 +41,7 @@ def main(args):
 
     disable_torch_init()
 
-    # Initialize WandB (Grouped by run_name, separate runs for each rank)
+    # Initialize WandB
     if args.use_wandb:
         wandb_config = vars(args).copy()
         wandb_config.update({
@@ -54,26 +54,25 @@ def main(args):
         })
 
         wandb.init(
-            project="simplear-proto-compression", 
-            name=f"{args.run_name}-rank{global_rank}", 
+            project="simplear-proto-compression",
+            name=f"{args.run_name}",
             group=args.run_name,
             config=wandb_config
         )
 
     # 1. Load Tokenizer (Cosmos)
-    if global_rank == 0:
-        print("Loading Cosmos Tokenizer...")
+    print("Loading Cosmos Tokenizer...")
     
     tokenizer_config = TokenizerConfigs["DV"].value
     tokenizer_config.update(dict(spatial_compression=16, temporal_compression=8))
     
     try:
         if os.path.exists(args.vq_model_ckpt):
-            if global_rank == 0: print(f"Loading Cosmos Tokenizer from local path: {args.vq_model_ckpt}")
+            print(f"Loading Cosmos Tokenizer from local path: {args.vq_model_ckpt}")
             enc_path = f"{args.vq_model_ckpt}/encoder.jit"
             dec_path = f"{args.vq_model_ckpt}/decoder.jit"
         else:
-            if global_rank == 0: print(f"Loading Cosmos Tokenizer from HF Hub: {args.vq_model_ckpt}")
+            print(f"Loading Cosmos Tokenizer from HF Hub: {args.vq_model_ckpt}")
             # Only rank 0 downloads if not present, but hf_hub_download handles cache concurrency usually.
             # To be safe, maybe barrier?
             enc_path = hf_hub_download(repo_id=args.vq_model_ckpt, filename="encoder.jit")
@@ -95,8 +94,7 @@ def main(args):
         return
 
     # 2. Load Model (SimpleAR)
-    if global_rank == 0:
-        print(f"Loading SimpleAR Model from {args.model_path}...")
+    print(f"Loading SimpleAR Model from {args.model_path}...")
     try:
         # device_map="auto" might try to use all GPUs if not careful. 
         # We explicitly pass the local device.
@@ -108,8 +106,7 @@ def main(args):
         return
 
     # 3. Generate Target Image (Self-Generation)
-    if global_rank == 0:
-        print("Generating target image using SimpleAR...")
+    print("Generating target image using SimpleAR...")
     
     prompt_text = "A highly realistic image of a cat"
     format_prompt = "<|t2i|>" + prompt_text + "<|soi|>"
@@ -141,9 +138,8 @@ def main(args):
     generated_tokens = output_ids[:, input_ids.shape[1]:]
     target_image_tokens = generated_tokens.flatten() # Shape: [Seq_Len]
     
-    if global_rank == 0:
-        print(f"Generated target image tokens shape: {target_image_tokens.shape}")
-        print("Decoding target image for visualization...")
+    print(f"Generated target image tokens shape: {target_image_tokens.shape}")
+    print("Decoding target image for visualization...")
 
     # Decode and log target image
     vocab_size = len(tokenizer)
@@ -182,8 +178,7 @@ def main(args):
         soi_embeds = embedding_layer(soi_id) # 1 x 1 x D
     
     # 5. Initialize Proto-Tokens (e + m structure)
-    if global_rank == 0:
-        print(f"Initializing {args.num_proto_tokens} proto-tokens (1 unique 'e' + {args.num_proto_tokens-1} shared 'm')...")
+    print(f"Initializing {args.num_proto_tokens} proto-tokens (1 unique 'e' + {args.num_proto_tokens-1} shared 'm')...")
     
     # e_token: Unique per rank (1, 1, D)
     e_token = nn.Parameter(torch.randn(1, 1, t2i_embeds.shape[-1], device=device, dtype=t2i_embeds.dtype) * 0.02)
@@ -198,8 +193,7 @@ def main(args):
     optimizer = optim.AdamW([e_token, m_token], lr=args.lr)
 
     # 6. Optimization Loop
-    if global_rank == 0:
-        print("Starting optimization...")
+    print("Starting optimization...")
     
     # Only show progress bar on rank 0
     pbar = tqdm(range(args.num_steps), disable=(global_rank != 0))
@@ -243,15 +237,14 @@ def main(args):
             
         optimizer.step()
         
-        if global_rank == 0:
-            pbar.set_description(f"Loss: {loss.item():.4f}")
+        pbar.set_description(f"Loss: {loss.item():.4f}")
         
         if args.use_wandb:
             wandb.log({"loss": loss.item(), "step": step})
         
         if step % args.save_interval == 0:
             # Save with rank to avoid collision
-            save_path = os.path.join(args.save_dir, f"proto_step_{step}_rank{global_rank}.pt")
+            save_path = os.path.join(args.save_dir, f"proto_step_{step}.pt")
             torch.save({
                 "e": e_token.detach().cpu(),
                 "m": m_token.detach().cpu(),
@@ -260,8 +253,7 @@ def main(args):
 
             # --- Reconstruction & Visualization (All Ranks) ---
             try:
-                if global_rank == 0:
-                    print(f"Generating reconstruction at step {step}...")
+                print(f"Generating reconstruction at step {step}...")
                 
                 # Construct prefix: [<|t2i|>, <|soi|>, Proto]
                 rec_input_embeds = torch.cat([t2i_embeds, soi_embeds, proto_embeddings], dim=1)
@@ -310,6 +302,7 @@ def main(args):
                     print(f"Failed to save reconstructed image to disk: {e}")
 
                 # Upload to WandB if enabled
+                # Upload to WandB if enabled
                 if args.use_wandb:
                     try:
                         wandb.log({
@@ -323,15 +316,14 @@ def main(args):
                 print(f"Rank {global_rank} Reconstruction failed: {e}")
 
     # Save final
-    save_path = os.path.join(args.save_dir, f"proto_final_rank{global_rank}.pt")
+    save_path = os.path.join(args.save_dir, f"proto_final.pt")
     torch.save({
         "e": e_token.detach().cpu(),
         "m": m_token.detach().cpu(),
         "full": proto_embeddings.detach().cpu()
     }, save_path)
     
-    if global_rank == 0:
-        print("Optimization finished.")
+    print("Optimization finished.")
     
     if args.use_wandb:
         wandb.finish()
