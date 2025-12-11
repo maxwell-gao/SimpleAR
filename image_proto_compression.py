@@ -7,6 +7,7 @@ import torch.optim as optim
 import torch.distributed as dist
 from PIL import Image
 from torchvision import transforms
+from torchvision.utils import save_image
 from tqdm import tqdm
 import wandb
 import numpy as np
@@ -300,12 +301,24 @@ def main(args):
                 # Calculate MSE against target (decoded_image from earlier)
                 mse_val = torch.nn.functional.mse_loss(rec_image, decoded_image)
                 
+                # Always save reconstructed image to disk for later inspection
+                try:
+                    rec_out_path = os.path.join(args.save_dir, f"reconstructed_step_{step}_rank{global_rank}.png")
+                    # rec_image: [C, H, W] in [0,1]
+                    save_image(rec_image.detach().cpu(), rec_out_path, normalize=False)
+                except Exception as e:
+                    print(f"Failed to save reconstructed image to disk: {e}")
+
+                # Upload to WandB if enabled
                 if args.use_wandb:
-                    wandb.log({
-                        "reconstructed_image": wandb.Image(rec_image.cpu()),
-                        "reconstruction_mse": mse_val.item(),
-                        "step": step
-                    })
+                    try:
+                        wandb.log({
+                            "reconstructed_image": wandb.Image(rec_image.cpu()),
+                            "reconstruction_mse": mse_val.item(),
+                            "step": step
+                        })
+                    except Exception as e:
+                        print(f"WandB logging failed for reconstructed image: {e}")
             except Exception as e:
                 print(f"Rank {global_rank} Reconstruction failed: {e}")
 
