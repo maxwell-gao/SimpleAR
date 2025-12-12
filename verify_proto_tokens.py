@@ -23,182 +23,211 @@ import numpy as np
 
 try:
     import wandb
+
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
     print("Warning: wandb not installed. Install with: pip install wandb")
 
 from simpar.model.tokenizer.cosmos_tokenizer.networks import TokenizerConfigs
-from simpar.model.tokenizer.cosmos_tokenizer.video_lib import CausalVideoTokenizer as CosmosTokenizer
+from simpar.model.tokenizer.cosmos_tokenizer.video_lib import (
+    CausalVideoTokenizer as CosmosTokenizer,
+)
 from simpar.model.builder import load_pretrained_model
 from simpar.utils import disable_torch_init
 
 
 class ProtoTokenOptimizer:
     """Optimizer class for learning proto-tokens"""
-    
-    def __init__(self, model, hidden_size, device, tokenizer_offset, num_steps=1000, use_wandb=False, num_proto_tokens=1):
+
+    def __init__(
+        self,
+        model,
+        hidden_size,
+        device,
+        tokenizer_offset,
+        num_steps=1000,
+        use_wandb=False,
+        num_proto_tokens=1,
+    ):
         self.model = model
         self.device = device
         self.hidden_size = hidden_size
         self.tokenizer_offset = tokenizer_offset
         self.use_wandb = use_wandb and WANDB_AVAILABLE
         self.num_proto_tokens = int(num_proto_tokens)
-        
+
         # Freeze model parameters to ensure they are not updated and save memory
         self.model.requires_grad_(False)
-        
+
         # Initialize proto-tokens
         # e_t: image specific embeddings (num_proto_tokens × hidden_size)
-        self.e_t = nn.Parameter(torch.randn(self.num_proto_tokens, hidden_size, device=device, dtype=model.dtype) * 0.01)
+        self.e_t = nn.Parameter(
+            torch.randn(
+                self.num_proto_tokens, hidden_size, device=device, dtype=model.dtype
+            )
+            * 0.01
+        )
         # m: reusable embedding (1 × hidden_size)
-        self.m = nn.Parameter(torch.randn(1, hidden_size, device=device, dtype=model.dtype) * 0.01)
-        
+        self.m = nn.Parameter(
+            torch.randn(1, hidden_size, device=device, dtype=model.dtype) * 0.01
+        )
+
         # Optimizer
         self.optimizer = torch.optim.AdamW(
-            [self.e_t, self.m],
-            lr=0.01,
-            weight_decay=0.0
+            [self.e_t, self.m], lr=0.01, weight_decay=0.0
         )
-        
+
         # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=num_steps,
-            eta_min=1e-5
+            self.optimizer, T_max=num_steps, eta_min=1e-5
         )
-        
+
         # Record training history
         self.history = {
-            'loss': [],
-            'accuracy': [],
-            'correct_tokens': [],
-            'top5_accuracy': [],
-            'e_t_norm': [],
-            'm_norm': [],
-            'grad_norm': []
+            "loss": [],
+            "accuracy": [],
+            "correct_tokens": [],
+            "top5_accuracy": [],
+            "e_t_norm": [],
+            "m_norm": [],
+            "grad_norm": [],
         }
-    
+
     def construct_input_embeddings(self, seq_length):
         """
         Construct input sequence: [e_t, m, m, m, ..., m]
-        
+
         Args:
             seq_length: Target sequence length
-        
+
         Returns:
             input_embeds: [1, seq_length, hidden_size]
         """
         # First positions are the num_proto_tokens e_t embeddings, the rest are m
         m_count = seq_length - self.num_proto_tokens
         if m_count <= 0:
-            raise ValueError(f"seq_length ({seq_length}) must be greater than num_proto_tokens ({self.num_proto_tokens})")
+            raise ValueError(
+                f"seq_length ({seq_length}) must be greater than num_proto_tokens ({self.num_proto_tokens})"
+            )
 
         m_repeated = self.m.repeat(m_count, 1)  # [m_count, hidden_size]
-        input_embeds = torch.cat([self.e_t, m_repeated], dim=0)  # [seq_length, hidden_size]
+        input_embeds = torch.cat(
+            [self.e_t, m_repeated], dim=0
+        )  # [seq_length, hidden_size]
         return input_embeds.unsqueeze(0)  # [1, seq_length, hidden_size]
-    
+
     def compute_loss_and_accuracy(self, target_tokens):
         """
         Compute loss and accuracy
-        
+
         Args:
             target_tokens: [1, seq_length] Target token sequence
-        
+
         Returns:
             loss, accuracy, correct_count, top5_acc
         """
         seq_length = target_tokens.size(1)
-        
+
         # Construct input embeddings
         input_embeds = self.construct_input_embeddings(seq_length)
-        
-        # Forward pass
+
+        # Forward pass through the frozen model to obtain hidden states
         outputs = self.model.model(
-            inputs_embeds=input_embeds,
-            use_cache=False,
-            return_dict=True
+            inputs_embeds=input_embeds, use_cache=False, return_dict=True
         )
         hidden_states = outputs.last_hidden_state  # [1, seq_length, hidden_size]
-        
-        # Get logits through lm_head
-        logits = self.model.lm_head(hidden_states)  # [1, seq_length, vocab_size]
-        
-        # Compute loss
-        # In Proto-Token setting, input at position i should predict target at position i
-        # No shifting needed because inputs are placeholders [e_t, m, m...]
-        loss = F.cross_entropy(
-            logits.view(-1, logits.size(-1)),
-            target_tokens.view(-1),
-            reduction='mean'
-        )
-        
-        # Compute accuracy
+
+        # Get logits through lm_head: [1, seq_length, vocab_size]
+        logits = self.model.lm_head(hidden_states)
+
+        # Compute predicted expected token embedding by taking softmax over logits
+        # and multiplying by lm_head weights: expected_emb = probs @ lm_head.weight
+        probs = torch.softmax(logits, dim=-1)  # [1, seq_length, vocab_size]
+
+        # lm_head.weight has shape [vocab_size, hidden_size]
+        lm_weights = self.model.lm_head.weight
+
+        # Expected embedding from the model's predictive distribution
+        # result shape: [1, seq_length, hidden_size]
+        expected_emb = torch.matmul(probs, lm_weights)
+
+        # Get target token embeddings from lm_head weights
+        # target_tokens: [1, seq_length] -> target_emb: [1, seq_length, hidden_size]
+        # Use embedding lookup for efficiency
+        target_emb = F.embedding(target_tokens, lm_weights)
+
+        # Compute embedding-distance loss (MSE) between expected and target embeddings
+        loss = F.mse_loss(expected_emb, target_emb, reduction="mean")
+
+        # Compute accuracy (keep same token-level accuracy metrics)
         predictions = logits.argmax(dim=-1)
         correct = (predictions == target_tokens).sum().item()
         total = target_tokens.numel()
         accuracy = correct / total * 100
-        
+
         # Compute Top-5 accuracy
         top5_preds = logits.topk(5, dim=-1).indices
-        top5_correct = (top5_preds == target_tokens.unsqueeze(-1)).any(dim=-1).sum().item()
+        top5_correct = (
+            (top5_preds == target_tokens.unsqueeze(-1)).any(dim=-1).sum().item()
+        )
         top5_accuracy = top5_correct / total * 100
-        
+
         return loss, accuracy, correct, top5_accuracy
-    
+
     def train_step(self, target_tokens):
         """Execute one training step"""
         self.model.eval()  # Keep model frozen
         self.optimizer.zero_grad()
-        
-        loss, accuracy, correct, top5_acc = self.compute_loss_and_accuracy(target_tokens)
-        
+
+        loss, accuracy, correct, top5_acc = self.compute_loss_and_accuracy(
+            target_tokens
+        )
+
         loss.backward()
-        
+
         # Compute gradient norm (before clipping)
         grad_norm = torch.sqrt(
             sum(p.grad.norm() ** 2 for p in [self.e_t, self.m] if p.grad is not None)
         ).item()
-        
+
         # Gradient clipping
         torch.nn.utils.clip_grad_norm_([self.e_t, self.m], max_norm=1.0)
-        
+
         self.optimizer.step()
         self.scheduler.step()
-        
+
         # Compute embedding norms
         e_t_norm = self.e_t.norm().item()
         m_norm = self.m.norm().item()
-        
+
         # Record history
-        self.history['loss'].append(loss.item())
-        self.history['accuracy'].append(accuracy)
-        self.history['correct_tokens'].append(correct)
-        self.history['top5_accuracy'].append(top5_acc)
-        self.history['e_t_norm'].append(e_t_norm)
-        self.history['m_norm'].append(m_norm)
-        self.history['grad_norm'].append(grad_norm)
-        
+        self.history["loss"].append(loss.item())
+        self.history["accuracy"].append(accuracy)
+        self.history["correct_tokens"].append(correct)
+        self.history["top5_accuracy"].append(top5_acc)
+        self.history["e_t_norm"].append(e_t_norm)
+        self.history["m_norm"].append(m_norm)
+        self.history["grad_norm"].append(grad_norm)
+
         return loss.item(), accuracy, correct, top5_acc, e_t_norm, m_norm, grad_norm
-    
+
     @torch.no_grad()
     def evaluate(self, target_tokens):
         """Evaluate reconstruction effect of current proto-tokens"""
         self.model.eval()
         return self.compute_loss_and_accuracy(target_tokens)
-    
+
     @torch.no_grad()
     def generate(self, seq_length):
         """Generate sequence using current proto-tokens"""
         input_embeds = self.construct_input_embeddings(seq_length)
-        
+
         outputs = self.model.model(
-            inputs_embeds=input_embeds,
-            use_cache=False,
-            return_dict=True
+            inputs_embeds=input_embeds, use_cache=False, return_dict=True
         )
         logits = self.model.lm_head(outputs.last_hidden_state)
-        
+
         # Greedy decoding
         predictions = logits.argmax(dim=-1)
         return predictions
@@ -207,31 +236,37 @@ class ProtoTokenOptimizer:
 def generate_reference_image(model, vq_model, tokenizer, prompt, args):
     """
     Generate reference image using SimpleAR and get its visual tokens
-    
+
     Returns:
         visual_tokens: [1, seq_length] Visual token sequence
         image: Generated image tensor
     """
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("Step 1: Generate reference image using SimpleAR")
-    print("="*80)
-    
+    print("=" * 80)
+
     codebook_size = 64000
     downsample_size = 16
     latent_size = args.image_size // downsample_size
-    max_new_tokens = latent_size ** 2
-    
+    max_new_tokens = latent_size**2
+
     # Construct prompt
     format_prompt = "<|t2i|>" + "A highly realistic image of " + prompt + "<|soi|>"
     input_ids = tokenizer(format_prompt, return_tensors="pt").input_ids.to(args.device)
-    
-    uncond_prompt = "<|t2i|>" + "An image of aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion" + "<|soi|>"
-    uncond_input_ids = tokenizer(uncond_prompt, return_tensors="pt").input_ids.to(args.device)
-    
+
+    uncond_prompt = (
+        "<|t2i|>"
+        + "An image of aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion"
+        + "<|soi|>"
+    )
+    uncond_input_ids = tokenizer(uncond_prompt, return_tensors="pt").input_ids.to(
+        args.device
+    )
+
     print(f"Prompt: {prompt}")
     print(f"Input sequence length: {input_ids.shape[1]}")
     print(f"Visual tokens to generate: {max_new_tokens}")
-    
+
     # Generate visual tokens
     print("Generating image...")
     with torch.inference_mode():
@@ -244,55 +279,61 @@ def generate_reference_image(model, vq_model, tokenizer, prompt, args):
             top_p=args.top_p,
             top_k=args.top_k,
             max_new_tokens=max_new_tokens,
-            use_cache=True
+            use_cache=True,
         )
-    
+
     # Extract visual tokens
-    visual_tokens = output_ids[:, input_ids.shape[1]: input_ids.shape[1] + max_new_tokens].clone()
-    
+    visual_tokens = output_ids[
+        :, input_ids.shape[1] : input_ids.shape[1] + max_new_tokens
+    ].clone()
+
     # Decode to image
     index_sample = visual_tokens - len(tokenizer)
-    index_sample = torch.clamp(index_sample, min=0, max=codebook_size-1)
+    index_sample = torch.clamp(index_sample, min=0, max=codebook_size - 1)
     index_sample = index_sample.reshape(-1, latent_size, latent_size).unsqueeze(1)
-    
+
     with torch.inference_mode():
         image = vq_model.decode(index_sample)
-    
+
     image = image.squeeze(2)
-    
+
     print(f"✓ Image generated successfully")
     print(f"✓ Visual tokens shape: {visual_tokens.shape}")
-    print(f"✓ Token range: [{visual_tokens.min().item()}, {visual_tokens.max().item()}]")
-    
+    print(
+        f"✓ Token range: [{visual_tokens.min().item()}, {visual_tokens.max().item()}]"
+    )
+
     return visual_tokens, image
 
 
 def verify_proto_tokens(model, tokenizer, vq_model, visual_tokens, args):
     """
     Verify if proto-tokens can reconstruct visual token sequence
-    
+
     Args:
         model: SimpleAR model
         tokenizer: Tokenizer
         visual_tokens: [1, seq_length] Target visual token sequence
         args: Arguments
     """
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("Step 2: Optimize Proto-Tokens to reconstruct visual sequence")
-    print("="*80)
-    
+    print("=" * 80)
+
     seq_length = visual_tokens.size(1)
     hidden_size = model.config.hidden_size
-    
+
     print(f"Sequence length: {seq_length}")
     print(f"Hidden size: {hidden_size}")
     print(f"Optimization steps: {args.num_steps}")
     print(f"Evaluation interval: {args.eval_interval} steps")
     print(f"Num proto (e) tokens: {args.num_proto_tokens}")
-    
+
     # Validate num_proto_tokens
     if args.num_proto_tokens >= seq_length:
-        raise ValueError(f"--num-proto-tokens ({args.num_proto_tokens}) must be less than sequence length ({seq_length})")
+        raise ValueError(
+            f"--num-proto-tokens ({args.num_proto_tokens}) must be less than sequence length ({seq_length})"
+        )
 
     # Create optimizer
     optimizer = ProtoTokenOptimizer(
@@ -302,48 +343,52 @@ def verify_proto_tokens(model, tokenizer, vq_model, visual_tokens, args):
         tokenizer_offset=len(tokenizer),
         num_steps=args.num_steps,
         use_wandb=args.use_wandb,
-        num_proto_tokens=args.num_proto_tokens
+        num_proto_tokens=args.num_proto_tokens,
     )
-    
+
     # Training loop
     print("\nStart optimization...")
     best_accuracy = 0
     best_step = 0
-    
+
     pbar = tqdm(range(args.num_steps), desc="Optimizing Proto-Tokens")
     for step in pbar:
-        loss, accuracy, correct, top5_acc, e_t_norm, m_norm, grad_norm = optimizer.train_step(visual_tokens)
-        
+        loss, accuracy, correct, top5_acc, e_t_norm, m_norm, grad_norm = (
+            optimizer.train_step(visual_tokens)
+        )
+
         # Update progress bar
-        pbar.set_postfix({
-            'loss': f'{loss:.4f}',
-            'acc': f'{accuracy:.2f}%',
-            'correct': f'{correct}/{seq_length}',
-            'top5': f'{top5_acc:.2f}%'
-        })
-        
+        pbar.set_postfix(
+            {
+                "loss": f"{loss:.4f}",
+                "acc": f"{accuracy:.2f}%",
+                "correct": f"{correct}/{seq_length}",
+                "top5": f"{top5_acc:.2f}%",
+            }
+        )
+
         # Record best result
         if accuracy > best_accuracy:
             best_accuracy = accuracy
             best_step = step
-        
+
         # WandB logging
         if args.use_wandb and WANDB_AVAILABLE:
             log_dict = {
-                'train/loss': loss,
-                'train/accuracy': accuracy,
-                'train/top5_accuracy': top5_acc,
-                'train/correct_tokens': correct,
-                'train/total_tokens': seq_length,
-                'train/best_accuracy': best_accuracy,
-                'train/learning_rate': optimizer.scheduler.get_last_lr()[0],
-                'embeddings/e_t_norm': e_t_norm,
-                'embeddings/m_norm': m_norm,
-                'gradients/grad_norm': grad_norm,
+                "train/loss": loss,
+                "train/accuracy": accuracy,
+                "train/top5_accuracy": top5_acc,
+                "train/correct_tokens": correct,
+                "train/total_tokens": seq_length,
+                "train/best_accuracy": best_accuracy,
+                "train/learning_rate": optimizer.scheduler.get_last_lr()[0],
+                "embeddings/e_t_norm": e_t_norm,
+                "embeddings/m_norm": m_norm,
+                "gradients/grad_norm": grad_norm,
             }
             # Ensure WandB receives a monotonically increasing step index
             try:
-                wandb.log(log_dict, step=step+1)
+                wandb.log(log_dict, step=step + 1)
             except Exception:
                 # Fallback to default logging if explicit step fails
                 wandb.log(log_dict)
@@ -356,31 +401,42 @@ def verify_proto_tokens(model, tokenizer, vq_model, visual_tokens, args):
             )
 
             # Save reconstructed image for this step
-            recon_image_step_path = os.path.join(args.save_dir, f"reconstructed_step_{step+1}.png")
+            recon_image_step_path = os.path.join(
+                args.save_dir, f"reconstructed_step_{step + 1}.png"
+            )
             try:
-                save_image(reconstructed_image, recon_image_step_path, normalize=True, value_range=(-1, 1))
-                print(f"Saved reconstructed image at step {step+1}: {recon_image_step_path}")
+                save_image(
+                    reconstructed_image,
+                    recon_image_step_path,
+                    normalize=True,
+                    value_range=(-1, 1),
+                )
+                print(
+                    f"Saved reconstructed image at step {step + 1}: {recon_image_step_path}"
+                )
             except Exception:
-                print(f"Warning: failed to save reconstructed image at step {step+1}")
+                print(f"Warning: failed to save reconstructed image at step {step + 1}")
 
             # Upload to WandB (if enabled)
             if args.use_wandb and WANDB_AVAILABLE:
                 # Normalize image from [-1, 1] to [0, 1] for WandB
                 recon_img_vis = (reconstructed_image[0].float().cpu() + 1) / 2
                 recon_img_vis = torch.clamp(recon_img_vis, 0, 1)
-                print(f"Uploading reconstructed image at step {step+1} to WandB...")
+                print(f"Uploading reconstructed image at step {step + 1} to WandB...")
 
                 # Log using the same title/key so WandB groups them together
-                wandb.log({
-                    "reconstructed_image": wandb.Image(
-                        recon_img_vis,
-                        caption="Reconstructed"
-                    )
-                }, step=step+1)
-        
+                wandb.log(
+                    {
+                        "reconstructed_image": wandb.Image(
+                            recon_img_vis, caption="Reconstructed"
+                        )
+                    },
+                    step=step + 1,
+                )
+
         # Print detailed info periodically
         if (step + 1) % 100 == 0:
-            print(f"\n[Step {step+1}/{args.num_steps}]")
+            print(f"\n[Step {step + 1}/{args.num_steps}]")
             print(f"  Loss: {loss:.4f}")
             print(f"  Accuracy: {accuracy:.2f}% ({correct}/{seq_length} tokens)")
             print(f"  Top-5 Accuracy: {top5_acc:.2f}%")
@@ -388,36 +444,39 @@ def verify_proto_tokens(model, tokenizer, vq_model, visual_tokens, args):
             print(f"  Learning Rate: {optimizer.scheduler.get_last_lr()[0]:.6f}")
             print(f"  e_t norm: {e_t_norm:.4f}, m norm: {m_norm:.4f}")
             print(f"  Gradient norm: {grad_norm:.4f}")
-    
+
     print("\nOptimization completed!")
     print(f"Final Accuracy: {accuracy:.2f}%")
     print(f"Best Accuracy: {best_accuracy:.2f}% (at step {best_step})")
-    
+
     # Save proto-tokens
     proto_tokens_path = os.path.join(args.save_dir, "proto_tokens.pt")
-    torch.save({
-        'e_t': optimizer.e_t.detach().cpu(),
-        'm': optimizer.m.detach().cpu(),
-        'target_tokens': visual_tokens.cpu(),
-        'history': optimizer.history,
-        'best_accuracy': best_accuracy,
-        'seq_length': seq_length
-    }, proto_tokens_path)
+    torch.save(
+        {
+            "e_t": optimizer.e_t.detach().cpu(),
+            "m": optimizer.m.detach().cpu(),
+            "target_tokens": visual_tokens.cpu(),
+            "history": optimizer.history,
+            "best_accuracy": best_accuracy,
+            "seq_length": seq_length,
+        },
+        proto_tokens_path,
+    )
     print(f"Proto-tokens saved to: {proto_tokens_path}")
-    
+
     # WandB save artifact
     if args.use_wandb and WANDB_AVAILABLE:
-        artifact = wandb.Artifact('proto_tokens', type='model')
+        artifact = wandb.Artifact("proto_tokens", type="model")
         artifact.add_file(proto_tokens_path)
         wandb.log_artifact(artifact)
-    
+
     return optimizer
 
 
 def reconstruct_image(optimizer, vq_model, visual_tokens, tokenizer_offset, args):
     """
     Reconstruct image using learned proto-tokens
-    
+
     Args:
         optimizer: ProtoTokenOptimizer instance
         vq_model: VQ model
@@ -425,36 +484,36 @@ def reconstruct_image(optimizer, vq_model, visual_tokens, tokenizer_offset, args
         tokenizer_offset: Tokenizer offset
         args: Arguments
     """
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("Step 3: Reconstruct image using Proto-Tokens")
-    print("="*80)
-    
+    print("=" * 80)
+
     seq_length = visual_tokens.size(1)
     latent_size = args.image_size // 16
     codebook_size = 64000
-    
+
     # Generate reconstructed tokens
     reconstructed_tokens = optimizer.generate(seq_length)
-    
+
     # Compute reconstruction accuracy
     correct = (reconstructed_tokens == visual_tokens).sum().item()
     total = seq_length
     accuracy = correct / total * 100
-    
+
     print(f"Reconstruction Accuracy: {accuracy:.2f}% ({correct}/{total} tokens)")
-    
+
     # Decode to image
     index_sample = reconstructed_tokens - tokenizer_offset
-    index_sample = torch.clamp(index_sample, min=0, max=codebook_size-1)
+    index_sample = torch.clamp(index_sample, min=0, max=codebook_size - 1)
     index_sample = index_sample.reshape(-1, latent_size, latent_size).unsqueeze(1)
-    
+
     with torch.inference_mode():
         reconstructed_image = vq_model.decode(index_sample)
-    
+
     reconstructed_image = reconstructed_image.squeeze(2)
-    
+
     print("✓ Image reconstruction completed")
-    
+
     return reconstructed_image, reconstructed_tokens
 
 
@@ -462,16 +521,18 @@ def main(args):
     # Set random seed
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
-    
+
     if args.image_size < 1024:
-        print(f"\n⚠️  Warning: Image size {args.image_size} may result in blurry images due to high VQGAN compression (16x).")
+        print(
+            f"\n⚠️  Warning: Image size {args.image_size} may result in blurry images due to high VQGAN compression (16x)."
+        )
         print("    Recommended size is 1024x1024.")
-    
+
     disable_torch_init()
-    
+
     # Create save directory
     os.makedirs(args.save_dir, exist_ok=True)
-    
+
     # Initialize WandB
     if args.use_wandb:
         if not WANDB_AVAILABLE:
@@ -482,22 +543,22 @@ def main(args):
                 project=args.wandb_project,
                 name=args.wandb_run_name,
                 config={
-                    'model_path': args.model_path,
-                    'vq_model': args.vq_model_ckpt,
-                    'prompt': args.prompt,
-                    'image_size': args.image_size,
-                    'num_steps': args.num_steps,
-                    'learning_rate': args.learning_rate,
-                    'temperature': args.temperature,
-                    'seed': args.seed,
+                    "model_path": args.model_path,
+                    "vq_model": args.vq_model_ckpt,
+                    "prompt": args.prompt,
+                    "image_size": args.image_size,
+                    "num_steps": args.num_steps,
+                    "learning_rate": args.learning_rate,
+                    "temperature": args.temperature,
+                    "seed": args.seed,
                 },
-                tags=['proto-tokens', 'feasibility', f'size-{args.image_size}']
+                tags=["proto-tokens", "feasibility", f"size-{args.image_size}"],
             )
             print(f"✓ WandB initialized: {wandb.run.url}")
-    
-    print("="*80)
+
+    print("=" * 80)
     print("Proto-Tokens Feasibility Verification Experiment")
-    print("="*80)
+    print("=" * 80)
     print(f"Model: {args.model_path}")
     print(f"VQ Model: {args.vq_model_ckpt}")
     print(f"Image Size: {args.image_size}x{args.image_size}")
@@ -505,55 +566,57 @@ def main(args):
     print(f"Save Directory: {args.save_dir}")
     if args.use_wandb:
         print(f"WandB Project: {args.wandb_project}")
-    
+
     # Load VQ Model
     print("\nLoading VQ Model...")
     tokenizer_config = TokenizerConfigs["DV"].value
     tokenizer_config.update(dict(spatial_compression=16, temporal_compression=8))
-    
+
     if os.path.isdir(args.vq_model_ckpt):
         checkpoint_enc = f"{args.vq_model_ckpt}/encoder.jit"
         checkpoint_dec = f"{args.vq_model_ckpt}/decoder.jit"
     else:
-        checkpoint_enc = hf_hub_download(repo_id=args.vq_model_ckpt, filename="encoder.jit")
-        checkpoint_dec = hf_hub_download(repo_id=args.vq_model_ckpt, filename="decoder.jit")
-    
+        checkpoint_enc = hf_hub_download(
+            repo_id=args.vq_model_ckpt, filename="encoder.jit"
+        )
+        checkpoint_dec = hf_hub_download(
+            repo_id=args.vq_model_ckpt, filename="decoder.jit"
+        )
+
     vq_model = CosmosTokenizer(
         checkpoint_enc=checkpoint_enc,
         checkpoint_dec=checkpoint_dec,
-        tokenizer_config=tokenizer_config
+        tokenizer_config=tokenizer_config,
     )
     vq_model.eval()
     vq_model.requires_grad_(False)
     print("✓ VQ Model loaded")
-    
+
     # Load SimpleAR Model
     print("\nLoading SimpleAR Model...")
     model_path = os.path.expanduser(args.model_path)
     tokenizer, model, _, _ = load_pretrained_model(
-        model_path,
-        attn_implementation="sdpa",
-        device_map=args.device
+        model_path, attn_implementation="sdpa", device_map=args.device
     )
     model.eval()
     print("✓ SimpleAR Model loaded")
-    
+
     # Step 1: Generate reference image
     tokens_path = os.path.join(args.save_dir, "visual_tokens.pt")
-    
+
     if os.path.exists(tokens_path) and not args.force_generate:
         print(f"\nFound existing visual tokens at {tokens_path}. Skipping generation.")
         visual_tokens = torch.load(tokens_path, map_location=args.device)
-        
+
         # Decode to get reference image for visualization
         print("Decoding visual tokens to get reference image...")
         codebook_size = 64000
         latent_size = args.image_size // 16
-        
+
         index_sample = visual_tokens - len(tokenizer)
-        index_sample = torch.clamp(index_sample, min=0, max=codebook_size-1)
+        index_sample = torch.clamp(index_sample, min=0, max=codebook_size - 1)
         index_sample = index_sample.reshape(-1, latent_size, latent_size).unsqueeze(1)
-        
+
         with torch.inference_mode():
             reference_image = vq_model.decode(index_sample)
         reference_image = reference_image.squeeze(2)
@@ -570,166 +633,221 @@ def main(args):
     ref_image_path = os.path.join(args.save_dir, "reference_image.png")
     save_image(reference_image, ref_image_path, normalize=True, value_range=(-1, 1))
     print(f"Reference image saved to: {ref_image_path}")
-    
+
     # WandB record reference image
     if args.use_wandb and WANDB_AVAILABLE:
         # Normalize image from [-1, 1] to [0, 1] for WandB
         ref_img_vis = (reference_image[0].float().cpu() + 1) / 2
         ref_img_vis = torch.clamp(ref_img_vis, 0, 1)
-        
-        wandb.log({
-            "reference_image": wandb.Image(
-                ref_img_vis,
-                caption=f"Reference: {args.prompt}"
-            ),
-            "num_visual_tokens": visual_tokens.size(1)
-        })
-    
+
+        wandb.log(
+            {
+                "reference_image": wandb.Image(
+                    ref_img_vis, caption=f"Reference: {args.prompt}"
+                ),
+                "num_visual_tokens": visual_tokens.size(1),
+            }
+        )
+
     # Step 2: Optimize proto-tokens
     optimizer = verify_proto_tokens(model, tokenizer, vq_model, visual_tokens, args)
-    
+
     # Step 3: Reconstruct image
     reconstructed_image, reconstructed_tokens = reconstruct_image(
         optimizer, vq_model, visual_tokens, len(tokenizer), args
     )
-    
+
     # Save reconstructed image
     recon_image_path = os.path.join(args.save_dir, "reconstructed_image.png")
-    save_image(reconstructed_image, recon_image_path, normalize=True, value_range=(-1, 1))
+    save_image(
+        reconstructed_image, recon_image_path, normalize=True, value_range=(-1, 1)
+    )
     print(f"Reconstructed image saved to: {recon_image_path}")
-    
+
     # Create comparison image
     comparison = torch.cat([reference_image, reconstructed_image], dim=-1)
     comp_path = os.path.join(args.save_dir, "comparison.png")
     save_image(comparison, comp_path, normalize=True, value_range=(-1, 1))
     print(f"Comparison image saved to: {comp_path}")
-    
+
     # WandB record reconstruction result
     if args.use_wandb and WANDB_AVAILABLE:
         # Normalize images from [-1, 1] to [0, 1] for WandB
         recon_img_vis = (reconstructed_image[0].float().cpu() + 1) / 2
         recon_img_vis = torch.clamp(recon_img_vis, 0, 1)
-        
+
         comp_img_vis = (comparison[0].float().cpu() + 1) / 2
         comp_img_vis = torch.clamp(comp_img_vis, 0, 1)
-        
-        wandb.log({
-            "reconstructed_image": wandb.Image(
-                recon_img_vis,
-                caption=f"Reconstructed (Acc: {optimizer.history['accuracy'][-1]:.2f}%)"
-            ),
-            "comparison": wandb.Image(comp_img_vis, caption="Left: Reference | Right: Reconstructed"),
-        })
-    
+
+        wandb.log(
+            {
+                "reconstructed_image": wandb.Image(
+                    recon_img_vis,
+                    caption=f"Reconstructed (Acc: {optimizer.history['accuracy'][-1]:.2f}%)",
+                ),
+                "comparison": wandb.Image(
+                    comp_img_vis, caption="Left: Reference | Right: Reconstructed"
+                ),
+            }
+        )
+
     # Compute token difference distribution
     token_diff = (reconstructed_tokens != visual_tokens).cpu().numpy()[0]
     error_positions = np.where(token_diff)[0]
-    
+
     if args.use_wandb and WANDB_AVAILABLE and len(error_positions) > 0:
         # Plot error distribution heatmap
         latent_size = int(np.sqrt(len(token_diff)))
         error_map = token_diff.reshape(latent_size, latent_size).astype(float)
-        
+
         # Log error map directly to wandb as a heatmap if possible, or skip image generation to avoid matplotlib dependency
         # For now, we will just log the error rate which is already done in summary
         pass
-    
+
     # Final summary
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("Experiment Summary")
-    print("="*80)
+    print("=" * 80)
     print(f"✓ Sequence Length: {visual_tokens.size(1)} tokens")
     print(f"✓ Final Accuracy: {optimizer.history['accuracy'][-1]:.2f}%")
     print(f"✓ Best Accuracy: {max(optimizer.history['accuracy']):.2f}%")
     print(f"✓ Final Loss: {optimizer.history['loss'][-1]:.4f}")
-    print(f"✓ Proto-tokens Parameters: {args.num_proto_tokens} × {model.config.hidden_size} (e) + 1 × {model.config.hidden_size} (m) = {(args.num_proto_tokens + 1) * model.config.hidden_size}")
-    
+    print(
+        f"✓ Proto-tokens Parameters: {args.num_proto_tokens} × {model.config.hidden_size} (e) + 1 × {model.config.hidden_size} (m) = {(args.num_proto_tokens + 1) * model.config.hidden_size}"
+    )
+
     # Record final summary to WandB
     if args.use_wandb and WANDB_AVAILABLE:
-        wandb.summary.update({
-            'final_accuracy': optimizer.history['accuracy'][-1],
-            'best_accuracy': max(optimizer.history['accuracy']),
-            'final_top5_accuracy': optimizer.history['top5_accuracy'][-1],
-            'final_loss': optimizer.history['loss'][-1],
-            'num_errors': len(error_positions),
-            'error_rate': len(error_positions) / len(token_diff) * 100,
-            'total_params': 2 * model.config.hidden_size
-        })
-    
-    if optimizer.history['accuracy'][-1] > 90:
-        print("\n🎉 Experiment Successful! Proto-tokens can reconstruct visual sequence with high accuracy!")
+        wandb.summary.update(
+            {
+                "final_accuracy": optimizer.history["accuracy"][-1],
+                "best_accuracy": max(optimizer.history["accuracy"]),
+                "final_top5_accuracy": optimizer.history["top5_accuracy"][-1],
+                "final_loss": optimizer.history["loss"][-1],
+                "num_errors": len(error_positions),
+                "error_rate": len(error_positions) / len(token_diff) * 100,
+                "total_params": 2 * model.config.hidden_size,
+            }
+        )
+
+    if optimizer.history["accuracy"][-1] > 90:
+        print(
+            "\n🎉 Experiment Successful! Proto-tokens can reconstruct visual sequence with high accuracy!"
+        )
         success_status = "success"
-    elif optimizer.history['accuracy'][-1] > 70:
-        print("\n✓ Experiment Partially Successful, Proto-tokens show reconstruction potential")
+    elif optimizer.history["accuracy"][-1] > 70:
+        print(
+            "\n✓ Experiment Partially Successful, Proto-tokens show reconstruction potential"
+        )
         success_status = "partial_success"
     else:
-        print("\n⚠️  Reconstruction accuracy is low, may need to adjust hyperparameters or increase optimization steps")
+        print(
+            "\n⚠️  Reconstruction accuracy is low, may need to adjust hyperparameters or increase optimization steps"
+        )
         success_status = "need_improvement"
-    
+
     if args.use_wandb and WANDB_AVAILABLE:
-        wandb.summary['status'] = success_status
+        wandb.summary["status"] = success_status
         wandb.finish()
-    
+
     print("\nAll results saved to:", args.save_dir)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Verify Proto-Tokens Feasibility")
-    
+
     # Model related
-    parser.add_argument("--model-path", type=str, 
-                       default="Daniel0724/SimpleAR-1.5B-RL",
-                       help="SimpleAR model path")
-    parser.add_argument("--vq-model-ckpt", type=str,
-                       default="nvidia/Cosmos-1.0-Tokenizer-DV8x16x16",
-                       help="VQ model path")
-    
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default="Daniel0724/SimpleAR-1.5B-RL",
+        help="SimpleAR model path",
+    )
+    parser.add_argument(
+        "--vq-model-ckpt",
+        type=str,
+        default="nvidia/Cosmos-1.0-Tokenizer-DV8x16x16",
+        help="VQ model path",
+    )
+
     # Generation related
-    parser.add_argument("--prompt", type=str,
-                       default="a red apple on a wooden table",
-                       help="Prompt for image generation")
-    parser.add_argument("--image-size", type=int, default=1024,
-                       choices=[256, 512, 768, 1024],
-                       help="Image size (1024 is recommended for best quality)")
-    parser.add_argument("--force-generate", action="store_true",
-                       help="Force regenerate reference image even if it exists")
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default="a red apple on a wooden table",
+        help="Prompt for image generation",
+    )
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=1024,
+        choices=[256, 512, 768, 1024],
+        help="Image size (1024 is recommended for best quality)",
+    )
+    parser.add_argument(
+        "--force-generate",
+        action="store_true",
+        help="Force regenerate reference image even if it exists",
+    )
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=64000)
-    
+
     # Optimization related
-    parser.add_argument("--num-steps", type=int, default=1000,
-                       help="Optimization steps")
-    parser.add_argument("--learning-rate", type=float, default=0.01,
-                       help="Learning rate")
-    
+    parser.add_argument(
+        "--num-steps", type=int, default=1000, help="Optimization steps"
+    )
+    parser.add_argument(
+        "--learning-rate", type=float, default=0.01, help="Learning rate"
+    )
+
     # Others
-    parser.add_argument("--save-dir", type=str, default="./proto_tokens_exp",
-                       help="Directory to save results")
-    parser.add_argument("--device", type=str, default="cuda:0",
-                       help="Computing device")
-    parser.add_argument("--seed", type=int, default=42,
-                       help="Random seed")
-    
+    parser.add_argument(
+        "--save-dir",
+        type=str,
+        default="./proto_tokens_exp",
+        help="Directory to save results",
+    )
+    parser.add_argument("--device", type=str, default="cuda:0", help="Computing device")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+
     # WandB related
-    parser.add_argument("--use-wandb", action="store_true",
-                       help="Use WandB to record experiment")
-    parser.add_argument("--wandb-project", type=str, default="simplear-proto-tokens",
-                       help="WandB project name")
-    parser.add_argument("--wandb-run-name", type=str, default=None,
-                       help="WandB run name (auto-generated by default)")
-    
+    parser.add_argument(
+        "--use-wandb", action="store_true", help="Use WandB to record experiment"
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="simplear-proto-tokens",
+        help="WandB project name",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="WandB run name (auto-generated by default)",
+    )
+
     # Evaluation interval for periodic reconstruction and upload
-    parser.add_argument("--eval_interval", type=int, default=1000,
-                       help="Evaluation interval (steps) to reconstruct and upload images to WandB")
-    parser.add_argument("--num-proto-tokens", type=int, default=1,
-                       help="Number of image-specific proto-tokens (e). Must be < sequence length")
+    parser.add_argument(
+        "--eval_interval",
+        type=int,
+        default=1000,
+        help="Evaluation interval (steps) to reconstruct and upload images to WandB",
+    )
+    parser.add_argument(
+        "--num-proto-tokens",
+        type=int,
+        default=1,
+        help="Number of image-specific proto-tokens (e). Must be < sequence length",
+    )
 
     args = parser.parse_args()
-    
+
     # Auto-generate run name
     if args.use_wandb and args.wandb_run_name is None:
         import datetime
+
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         args.wandb_run_name = f"proto_tokens_{args.image_size}px_{timestamp}"
 
